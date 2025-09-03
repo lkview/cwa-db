@@ -1,0 +1,44 @@
+{
+  "time_window_pass": {
+    "ok": true
+  },
+  "time_window_fail": {
+    "ok": false,
+    "error": {
+      "code": "ERR_TIME_WINDOW"
+    }
+  },
+  "status_transition_fail": {
+    "ok": false,
+    "error": {
+      "code": "ERR_STATUS_TRANSITION"
+    }
+  },
+  "assign_second_pilot_fail": {
+    "ok": false,
+    "error": {
+      "code": "ERR_DUPLICATE_ROLE"
+    }
+  },
+  "assign_third_passenger_fail": {
+    "ok": false,
+    "error": {
+      "code": "ERR_DUPLICATE_ROLE"
+    }
+  },
+  "overlap_fail": {
+    "ok": false,
+    "error": {
+      "code": "ERR_OVERLAP"
+    }
+  },
+  "contact_fail": {
+    "ok": false,
+    "error": {
+      "code": "ERR_INVALID_INPUT"
+    }
+  },
+  "contact_pass": {
+    "ok": true
+  }
+}
