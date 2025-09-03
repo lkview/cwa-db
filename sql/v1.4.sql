@@ -1,0 +1,3 @@
+-- v1.4.sql
+-- Placeholder for generated schema SQL
+-- This script will drop and recreate all database objects.
