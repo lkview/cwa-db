@@ -40,6 +40,21 @@ create table app_user_roles (
   primary key (user_id, role_key)
 );
 
+
+-- App settings (singleton row: id=1)
+create table app_settings (
+  id          int not null primary key default 1 check (id = 1),
+  start_hour  int not null check (start_hour between 0 and 23),
+  end_hour    int not null check (end_hour between 1 and 24),
+  timezone    text not null,
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now()
+);
+
+create trigger trg_app_settings_updated_at
+before update on app_settings
+for each row execute function set_updated_at();
+
 -- People
 create table people (
   id            uuid        primary key default gen_random_uuid(),
@@ -97,7 +112,12 @@ create table rides (
   updated_at       timestamptz not null default now(),
   created_by       uuid        null,
   updated_by       uuid        null
+
+  ,
+  constraint rides_cancelled_reason_chk
+    check (status <> 'cancelled' or coalesce(length(btrim(cancellation_reason)) > 0, false))
 );
+
 
 create trigger trg_rides_updated_at
 before update on rides
@@ -122,6 +142,34 @@ create index idx_ra_person_role on ride_assignments(person_id, role);
 create unique index ux_ra_one_pilot_per_ride
   on ride_assignments(ride_id)
   where role = 'pilot';
+
+-- Enforce <= 2 passengers per ride (DB-level hardening)
+create or replace function enforce_max_two_passengers()
+returns trigger
+language plpgsql as $$
+declare
+  v_ride uuid;
+  v_count int;
+begin
+  v_ride := coalesce(new.ride_id, old.ride_id);
+  select count(*) into v_count
+  from ride_assignments
+  where ride_id = v_ride and role = 'passenger';
+
+  if v_count > 2 then
+    raise exception 'Passenger limit exceeded (max 2)';
+  end if;
+
+  return null; -- ignored for AFTER/CONSTRAINT triggers
+end;
+$$;
+
+drop trigger if exists trg_ra_max_two_passengers on ride_assignments;
+create constraint trigger trg_ra_max_two_passengers
+  after insert or update or delete on ride_assignments
+  deferrable initially immediate
+  for each row execute function enforce_max_two_passengers();
+
 
 -- Ride assignment contacts
 create table ride_assignment_contacts (
@@ -348,6 +396,7 @@ alter table ride_assignments         enable row level security;
 alter table ride_assignment_contacts enable row level security;
 alter table ride_notes               enable row level security;
 alter table pilot_certifications     enable row level security;
+alter table app_settings               enable row level security;
 
 -- 2) Policies: allow SELECT for authenticated on all base tables
 --    (required so views can resolve for non-admins)
@@ -409,6 +458,14 @@ begin
     create policy aur_select_authenticated on app_user_roles
       for select to authenticated using (user_id = auth.uid());
   end if;
+
+
+if not exists (
+  select 1 from pg_policies where schemaname = 'public' and tablename = 'app_settings' and policyname = 'app_settings_select_authenticated'
+) then
+  create policy app_settings_select_authenticated on app_settings
+    for select to authenticated using (true);
+end if;
 end$$;
 
 -- 3) Grant SELECT on views to authenticated (and nothing else)
@@ -426,6 +483,7 @@ set search_path = public;
 
 -- 0) Wipe data (not objects)
 truncate table
+  app_settings,
   ride_assignment_contacts,
   ride_notes,
   ride_assignments,
@@ -435,6 +493,11 @@ truncate table
   people,
   app_user_roles
 restart identity cascade;
+
+-- Insert default operating hours/timezone
+insert into app_settings (id, start_hour, end_hour, timezone)
+values (1, 7, 20, 'America/Los_Angeles');
+
 
 -- 1) People
 insert into people (id, first_name, last_name, email, phone, role_affinity, notes)
@@ -535,9 +598,30 @@ set search_path = public;
 -- ------------------------------------------------------------------
 
 -- Convert to local time and check hour window
+-- Convert to local time and check hour window based on app_settings
 create or replace function is_within_operating_hours(ts timestamptz) returns boolean
-language sql stable as $$
-  select extract(hour from (ts at time zone 'America/Los_Angeles')) between 7 and 19;
+language plpgsql stable security definer set search_path = public as $$
+declare
+  v_start int := 7;
+  v_end   int := 20;
+  v_tz    text := 'America/Los_Angeles';
+  v_hour  int;
+begin
+  -- Read settings if available
+  begin
+    select start_hour, end_hour, timezone
+      into v_start, v_end, v_tz
+    from app_settings
+    limit 1;
+  exception when others then
+    -- fall back to defaults if table/policy not readable
+    v_start := 7; v_end := 20; v_tz := 'America/Los_Angeles';
+  end;
+
+  v_hour := extract(hour from (ts at time zone v_tz));
+
+  return (v_hour >= v_start and v_hour < v_end);
+end;
 $$;
 
 -- Build json response helpers
