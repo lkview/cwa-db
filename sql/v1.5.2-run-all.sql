@@ -989,4 +989,4 @@ assign_person(uuid,uuid,text),
   err(text,text,text)
 to authenticated;
 
--- End. Now run tests/v1.4-step3-compare-v2.overlap.sql to verify behavior.
+-- End. Now run tests/v1.5-tests.sql to verify behavior.

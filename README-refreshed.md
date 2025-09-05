@@ -18,7 +18,7 @@ This repository defines the Supabase/Postgres schema, views, RPCs, and tests for
    ⚠️ This script **drops and recreates** the `public` schema. Do not run on production.
 3. Run the tests:
    ```sql
-   \i tests/tests/v1.5-tests.sql
+   \i tests/v1.5-tests.sql
    ```
    All rows should have `pass = true`.
 
@@ -33,12 +33,12 @@ values ('<your-auth-user-id>', 'admin');
 
 ## File Layout
 
-- `spec/v1.4.md` – Canonical spec (rules, process, runbook, next steps)
+- `v1.5-refreshed.md` – Canonical spec (rules, process, runbook, next steps)
 - `sql/v1.5.2-run-all.sql` – One-pass installer (schema → views → seed → RPCs)
-- `tests/tests/v1.5-tests.sql` – Self-contained PASS/FAIL test suite
+- `tests/v1.5-tests.sql` – Self-contained PASS/FAIL test suite
 
 Supporting files (for traceability):
-- `sql/v1.4.sql` – Base schema only
+- `sql/v1.5.2-run-all.sql (authoritative)` – Base schema only
 - `sql/v1.4-step2-views-rls.sql` – Views + RLS
 - `sql/v1.4-step2.1-seed.sql` – Seed data
 - `sql/v1.4-step3-rpcs-validations.sql` – RPCs & validations
