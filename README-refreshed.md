@@ -1,5 +1,8 @@
 # CWA Ride Scheduler (v1.4)
 
+> **Update (v1.5):** Adds People hardening (trimmed names, contact required, email/phone normalization with uniqueness), RLS write policies for admin/scheduler, and `upsert_person(...)` RPC. Default test entrypoint is now `tests/v1.5-tests.sql`.
+
+
 > **Note:** v1.4 includes **Step 4 (DB Hardening)**: DB CHECK on `rides` for `cancellation_reason` when `status='cancelled'`, a constraint trigger capping passengers to ≤2, and the `app_settings` table powering `is_within_operating_hours()`.
 
 
@@ -10,12 +13,12 @@ This repository defines the Supabase/Postgres schema, views, RPCs, and tests for
 1. Open the Supabase SQL Editor.
 2. Run the installer:
    ```sql
-   \i sql/v1.4-run-all-fixed.sql
+   \i sql/v1.5.2-run-all.sql
    ```
    ⚠️ This script **drops and recreates** the `public` schema. Do not run on production.
 3. Run the tests:
    ```sql
-   \i tests/tests/v1.4-tests.sql
+   \i tests/tests/v1.5-tests.sql
    ```
    All rows should have `pass = true`.
 
@@ -31,8 +34,8 @@ values ('<your-auth-user-id>', 'admin');
 ## File Layout
 
 - `spec/v1.4.md` – Canonical spec (rules, process, runbook, next steps)
-- `sql/v1.4-run-all-fixed.sql` – One-pass installer (schema → views → seed → RPCs)
-- `tests/tests/v1.4-tests.sql` – Self-contained PASS/FAIL test suite
+- `sql/v1.5.2-run-all.sql` – One-pass installer (schema → views → seed → RPCs)
+- `tests/tests/v1.5-tests.sql` – Self-contained PASS/FAIL test suite
 
 Supporting files (for traceability):
 - `sql/v1.4.sql` – Base schema only
@@ -58,15 +61,15 @@ Supporting files (for traceability):
 
 ---
 
+
 ## Tests (single-file suite)
 
-Use the consolidated test runner for v1.4 (Step 3 + Step 4 hardening).
+Use the consolidated test runner for **v1.5** (Step 3 + Step 4 + People hardening).
 
 ```bash
 # Install schema + seeds
-psql "$DATABASE_URL" -f sql/v1.4-run-all-fixed.sql
+psql "$DATABASE_URL" -f sql/v1.5.2-run-all.sql
 
 # Run all tests (one result set)
-psql "$DATABASE_URL" -f tests/v1.4-tests.sql
+psql "$DATABASE_URL" -f tests/v1.5-tests.sql
 ```
-
