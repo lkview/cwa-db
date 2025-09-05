@@ -1,5 +1,8 @@
 # CWA Ride Scheduler (v1.4)
 
+> **Note:** v1.4 includes **Step 4 (DB Hardening)**: DB CHECK on `rides` for `cancellation_reason` when `status='cancelled'`, a constraint trigger capping passengers to ≤2, and the `app_settings` table powering `is_within_operating_hours()`.
+
+
 This repository defines the Supabase/Postgres schema, views, RPCs, and tests for the CWA Ride Scheduler.
 
 ## Quick Start (Dev/Disposable DB only)
@@ -12,7 +15,7 @@ This repository defines the Supabase/Postgres schema, views, RPCs, and tests for
    ⚠️ This script **drops and recreates** the `public` schema. Do not run on production.
 3. Run the tests:
    ```sql
-   \i tests/v1.4-step3-compare-v2.overlap.sql
+   \i tests/tests/v1.4-tests.sql
    ```
    All rows should have `pass = true`.
 
@@ -29,7 +32,7 @@ values ('<your-auth-user-id>', 'admin');
 
 - `spec/v1.4.md` – Canonical spec (rules, process, runbook, next steps)
 - `sql/v1.4-run-all-fixed.sql` – One-pass installer (schema → views → seed → RPCs)
-- `tests/v1.4-step3-compare-v2.overlap.sql` – Self-contained PASS/FAIL test suite
+- `tests/tests/v1.4-tests.sql` – Self-contained PASS/FAIL test suite
 
 Supporting files (for traceability):
 - `sql/v1.4.sql` – Base schema only
@@ -52,3 +55,18 @@ Supporting files (for traceability):
 - Create `app_settings` table for configurable hours & timezone.
 - Refactor `is_within_operating_hours()` to read from `app_settings`.
 - Add CI workflow (GitHub Action) to run run-all + tests automatically.
+
+---
+
+## Tests (single-file suite)
+
+Use the consolidated test runner for v1.4 (Step 3 + Step 4 hardening).
+
+```bash
+# Install schema + seeds
+psql "$DATABASE_URL" -f sql/v1.4-run-all-fixed.sql
+
+# Run all tests (one result set)
+psql "$DATABASE_URL" -f tests/v1.4-tests.sql
+```
+
