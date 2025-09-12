@@ -455,3 +455,185 @@ DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION cwa._check_overlaps();
 
 COMMIT;
+
+
+-- =============================================================
+-- PHASE 2 — ADDITIONS (People/Role/Status RPCs + EC status guard)
+-- Idempotent: uses CREATE OR REPLACE; safe to run multiple times.
+-- =============================================================
+SET search_path = cwa, public;
+SET client_min_messages = WARNING;
+
+-- Guard: EC must be a valid person in allowed status (active for v1.9)
+CREATE OR REPLACE FUNCTION cwa._ec_is_assignable(p_person_id uuid)
+RETURNS boolean
+LANGUAGE sql STABLE AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM cwa.people pe
+    WHERE pe.person_id = p_person_id AND pe.status_key = 'active'
+  );
+$$;
+
+-- UPDATE: link_emergency_contact now enforces EC status
+CREATE OR REPLACE FUNCTION cwa.link_emergency_contact(p_ride_id uuid, p_passenger_id uuid, p_contact_person_id uuid)
+RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE
+  v_auth uuid := cwa.current_auth_uid();
+  v_r cwa.ride_events%ROWTYPE;
+  v_pax_assigned boolean;
+  v_ec cwa.people%ROWTYPE;
+BEGIN
+  IF NOT cwa.is_admin_or_scheduler(v_auth) THEN
+    RETURN cwa._json_result(false, NULL, 'ERR_PRIVS', 'Only admin/scheduler may write.');
+  END IF;
+
+  SELECT * INTO v_r FROM cwa.ride_events WHERE ride_id = p_ride_id;
+  IF v_r.ride_id IS NULL THEN
+    RETURN cwa._json_result(false, NULL, 'ERR_INPUT', 'Ride not found');
+  END IF;
+
+  v_pax_assigned := EXISTS (
+    SELECT 1 FROM cwa.ride_assignments
+    WHERE ride_id = p_ride_id AND person_id = p_passenger_id AND role_key = 'passenger'
+  );
+  IF NOT v_pax_assigned THEN
+    RETURN cwa._json_result(false, NULL, 'ERR_EC_LINK', 'Passenger not assigned to this ride');
+  END IF;
+
+  SELECT * INTO v_ec FROM cwa.people WHERE person_id = p_contact_person_id;
+  IF v_ec.person_id IS NULL THEN
+    RETURN cwa._json_result(false, NULL, 'ERR_INPUT', 'Contact person not found');
+  END IF;
+
+  -- NEW: status guard for EC
+  IF NOT cwa._ec_is_assignable(p_contact_person_id) THEN
+    RETURN cwa._json_result(false, NULL, 'ERR_STATUS', 'Emergency contact not allowed for current status');
+  END IF;
+
+  -- EC must not be busy/unavailable for the window
+  IF cwa._is_unavailable(p_contact_person_id, v_r.start_at, v_r.end_at) THEN
+    RETURN cwa._json_result(false, NULL, 'ERR_UNAVAILABLE', 'EC unavailable for ride window');
+  END IF;
+
+  INSERT INTO cwa.ride_passenger_contacts(ride_id, passenger_id, contact_person_id)
+  VALUES (p_ride_id, p_passenger_id, p_contact_person_id)
+  ON CONFLICT DO NOTHING;
+
+  RETURN cwa._json_result(true, jsonb_build_object('ride_id', p_ride_id, 'passenger_id', p_passenger_id, 'contact_person_id', p_contact_person_id));
+END;
+$$;
+
+-- People/Role/Status Administrative RPCs (Public API)
+
+-- 1) upsert_person
+CREATE OR REPLACE FUNCTION cwa.upsert_person(p_person jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE
+  v_auth uuid := cwa.current_auth_uid();
+  v_id uuid := COALESCE((p_person->>'person_id')::uuid, gen_random_uuid());
+  v_fn text := NULLIF(TRIM(p_person->>'first_name'), '');
+  v_ln text := NULLIF(TRIM(p_person->>'last_name'), '');
+  v_email text := NULLIF(TRIM(p_person->>'email'), '');
+  v_phone text := NULLIF(TRIM(p_person->>'phone'), '');
+  v_status text := COALESCE(NULLIF(TRIM(p_person->>'status_key'), ''), 'active');
+  v_row cwa.people%ROWTYPE;
+BEGIN
+  IF NOT cwa.is_admin_or_scheduler(v_auth) THEN
+    RETURN cwa._json_result(false, NULL, 'ERR_PRIVS', 'Only admin/scheduler may write.');
+  END IF;
+
+  IF EXISTS (SELECT 1 FROM cwa.people WHERE person_id = v_id) THEN
+    UPDATE cwa.people
+       SET first_name = COALESCE(v_fn, first_name),
+           last_name  = COALESCE(v_ln, last_name),
+           email      = COALESCE(v_email, email),
+           phone      = COALESCE(v_phone, phone)
+     WHERE person_id = v_id;
+  ELSE
+    INSERT INTO cwa.people(person_id, first_name, last_name, email, phone, status_key)
+    VALUES (v_id, COALESCE(v_fn,''), COALESCE(v_ln,''), v_email, v_phone, v_status);
+  END IF;
+
+  SELECT * INTO v_row FROM cwa.people WHERE person_id = v_id;
+  RETURN cwa._json_result(true, to_jsonb(v_row));
+END;
+$$;
+
+-- 2) set_person_status
+CREATE OR REPLACE FUNCTION cwa.set_person_status(p_person_id uuid, p_status_key text)
+RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE
+  v_auth uuid := cwa.current_auth_uid();
+  v_exists boolean;
+  v_row cwa.people%ROWTYPE;
+BEGIN
+  IF NOT cwa.is_admin_or_scheduler(v_auth) THEN
+    RETURN cwa._json_result(false, NULL, 'ERR_PRIVS', 'Only admin/scheduler may write.');
+  END IF;
+
+  SELECT EXISTS (SELECT 1 FROM cwa.statuses WHERE status_key = p_status_key) INTO v_exists;
+  IF NOT v_exists THEN
+    RETURN cwa._json_result(false, NULL, 'ERR_INPUT', 'Unknown status_key');
+  END IF;
+
+  UPDATE cwa.people SET status_key = p_status_key WHERE person_id = p_person_id;
+  SELECT * INTO v_row FROM cwa.people WHERE person_id = p_person_id;
+  RETURN cwa._json_result(true, to_jsonb(v_row));
+END;
+$$;
+
+-- 3) upsert_contact_methods
+CREATE OR REPLACE FUNCTION cwa.upsert_contact_methods(p_person_id uuid, p_email text, p_phone text)
+RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE
+  v_auth uuid := cwa.current_auth_uid();
+  v_row cwa.people%ROWTYPE;
+BEGIN
+  IF NOT cwa.is_admin_or_scheduler(v_auth) THEN
+    RETURN cwa._json_result(false, NULL, 'ERR_PRIVS', 'Only admin/scheduler may write.');
+  END IF;
+
+  UPDATE cwa.people
+     SET email = COALESCE(NULLIF(TRIM(p_email),''), email),
+         phone = COALESCE(NULLIF(TRIM(p_phone),''), phone)
+   WHERE person_id = p_person_id;
+
+  SELECT * INTO v_row FROM cwa.people WHERE person_id = p_person_id;
+  RETURN cwa._json_result(true, to_jsonb(v_row));
+END;
+$$;
+
+-- 4) add / remove role
+CREATE OR REPLACE FUNCTION cwa.add_person_role(p_person_id uuid, p_role_key text)
+RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE
+  v_auth uuid := cwa.current_auth_uid();
+BEGIN
+  IF NOT cwa.is_admin_or_scheduler(v_auth) THEN
+    RETURN cwa._json_result(false, NULL, 'ERR_PRIVS', 'Only admin/scheduler may write.');
+  END IF;
+  INSERT INTO cwa.person_roles(person_id, role_key)
+  VALUES (p_person_id, p_role_key)
+  ON CONFLICT DO NOTHING;
+  RETURN cwa._json_result(true, jsonb_build_object('person_id', p_person_id, 'role_key', p_role_key));
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION cwa.remove_person_role(p_person_id uuid, p_role_key text)
+RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE
+  v_auth uuid := cwa.current_auth_uid();
+BEGIN
+  IF NOT cwa.is_admin_or_scheduler(v_auth) THEN
+    RETURN cwa._json_result(false, NULL, 'ERR_PRIVS', 'Only admin/scheduler may write.');
+  END IF;
+  DELETE FROM cwa.person_roles WHERE person_id = p_person_id AND role_key = p_role_key;
+  RETURN cwa._json_result(true, jsonb_build_object('person_id', p_person_id, 'role_key', p_role_key));
+END;
+$$;

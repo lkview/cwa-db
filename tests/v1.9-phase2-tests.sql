@@ -1,5 +1,6 @@
--- CWA Ride Scheduler — v1.9 Phase 2 TESTS (fixed5: expected DB errors count as ok=true)
--- Run after Phase 1 + Phase 2 run. Emits rows: test | ok | data | err_code
+-- CWA Ride Scheduler — v1.9 Phase 2 TESTS (latest v2: fixes ERR_PRIVS by ensuring admin mapping)
+-- Emits rows: test | ok | data | err_code
+-- Uses **tomorrow** (America/Los_Angeles) for windows to avoid immutability.
 
 SET search_path = cwa, public;
 
@@ -25,6 +26,7 @@ LANGUAGE plpgsql AS $$
 DECLARE
   r jsonb;
   r2 jsonb;
+  r3 jsonb;
   rid uuid;
   rid2 uuid;
   pilot uuid;
@@ -32,7 +34,9 @@ DECLARE
   pax2 uuid;
   pax3 uuid;
   ec1 uuid;
+  ec2 uuid;
   p2 uuid;
+  new_person uuid;
   d_local date;
   start_ok timestamptz;
   end_ok   timestamptz;
@@ -42,9 +46,19 @@ DECLARE
   end_overlap   timestamptz;
   start_future timestamptz;
   end_future   timestamptz;
+  v_admin uuid := '00000000-0000-0000-0000-000000000001'::uuid;
+  v_admin_person uuid;
 BEGIN
-  -- Impersonate admin for writes
-  PERFORM set_config('request.jwt.claims','{"sub":"00000000-0000-0000-0000-000000000001"}', true);
+  -- Ensure the admin auth is mapped to a real person (Alice) so is_admin_or_scheduler() returns TRUE
+  SELECT person_id INTO v_admin_person FROM cwa.people WHERE first_name='Alice' ORDER BY person_id LIMIT 1;
+  IF v_admin_person IS NOT NULL THEN
+    INSERT INTO cwa.app_user_people(person_id, auth_user_id)
+    VALUES (v_admin_person, v_admin)
+    ON CONFLICT DO NOTHING;
+  END IF;
+
+  -- Impersonate admin for writes (local to this function txn is fine)
+  PERFORM set_config('request.jwt.claims', json_build_object('sub', v_admin)::text, true);
 
   -- Compute tomorrow's local date in America/Los_Angeles, then build windows
   d_local := (now() AT TIME ZONE 'America/Los_Angeles')::date + 1;
@@ -70,7 +84,7 @@ BEGIN
   WHERE p.status_key='interested'
   LIMIT 1;
 
-  -- Create two more passengers & one EC person
+  -- Create two more passengers & two EC people
   INSERT INTO cwa.people(first_name,last_name,email,phone,status_key)
   VALUES ('Bob','Pax','bob@example.com','+1 206 555 6001','interested')
   RETURNING person_id INTO pax2;
@@ -84,6 +98,10 @@ BEGIN
   INSERT INTO cwa.people(first_name,last_name,email,phone,status_key)
   VALUES ('Eve','Contact','eve@example.com','+1 206 555 7001','interested')
   RETURNING person_id INTO ec1;
+
+  INSERT INTO cwa.people(first_name,last_name,email,phone,status_key)
+  VALUES ('Ivy','InactiveEC','ivy@example.com','+1 206 555 7002','inactive')
+  RETURNING person_id INTO ec2;
 
   -- 1) ride_ok_create (within hours)
   r := cwa.save_ride(jsonb_build_object(
@@ -164,7 +182,7 @@ BEGIN
   DELETE FROM cwa.ride_assignments WHERE ride_id = rid2 AND person_id = pilot;
   DELETE FROM cwa.ride_events WHERE ride_id = rid2;
 
-  -- 10) ec_before_passenger_blocked
+  -- 10) ec_before_passenger_blocked — passenger not yet assigned → ERR_EC_LINK
   r2 := cwa.save_ride(jsonb_build_object(
     'start_at', start_future,
     'end_at',   end_future,
@@ -174,14 +192,52 @@ BEGIN
   r2 := cwa.link_emergency_contact(rid2, pax2, ec1);
   RETURN QUERY SELECT * FROM cwa._t_row('ec_before_passenger_blocked', (r2->>'ok')::boolean = false AND r2->>'err_code'='ERR_EC_LINK', NULL, r2->>'err_code');
 
-  -- 11) ec_link_ok
-  PERFORM cwa.assign_person(rid2, pax2, 'passenger');
+  -- 11) ec_wrong_status_or_role_blocked — EC has disallowed status → ERR_STATUS
+  PERFORM cwa.assign_person(rid2, pax2, 'passenger'); -- now passenger is assigned
+  r2 := cwa.link_emergency_contact(rid2, pax2, ec2);
+  RETURN QUERY SELECT * FROM cwa._t_row('ec_wrong_status_or_role_blocked', (r2->>'ok')::boolean = false AND r2->>'err_code'='ERR_STATUS', NULL, r2->>'err_code');
+
+  -- 12) ec_link_ok — activate ec1 first, then link
+  PERFORM (cwa.set_person_status(ec1, 'active'::text));
   r2 := cwa.link_emergency_contact(rid2, pax2, ec1);
   RETURN QUERY SELECT * FROM cwa._t_row('ec_link_ok', (r2->>'ok')::boolean, r2->'data', r2->>'err_code');
 
-  -- 12) ride_cancel_with_reason_ok
+  -- 13) ride_cancel_with_reason_ok
   r2 := cwa.save_ride(jsonb_build_object('ride_id', rid2, 'start_at',start_future, 'end_at',end_future, 'status','cancelled', 'cancel_reason','weather'));
   RETURN QUERY SELECT * FROM cwa._t_row('ride_cancel_with_reason_ok', (r2->>'ok')::boolean, r2->'data', r2->>'err_code');
+
+  -- 14) People RPCs — upsert_person (create)
+  r3 := cwa.upsert_person(jsonb_build_object(
+    'first_name','Test','last_name','Person','email','test.person@example.com','phone','+1 206 555 8001','status_key','interested'
+  ));
+  new_person := (r3->'data'->>'person_id')::uuid;
+  RETURN QUERY SELECT * FROM cwa._t_row('upsert_person_create_ok', (r3->>'ok')::boolean, r3->'data', r3->>'err_code');
+
+  -- 15) People RPCs — upsert_person (update)
+  r3 := cwa.upsert_person(jsonb_build_object(
+    'person_id', new_person, 'email','updated.person@example.com','phone','+1 206 555 8002'
+  ));
+  RETURN QUERY SELECT * FROM cwa._t_row('upsert_person_update_ok', (r3->>'ok')::boolean, r3->'data', r3->>'err_code');
+
+  -- 16) set_person_status_ok
+  r3 := cwa.set_person_status(new_person, 'active'::text);
+  RETURN QUERY SELECT * FROM cwa._t_row('set_person_status_ok', (r3->>'ok')::boolean, r3->'data', r3->>'err_code');
+
+  -- 17) set_person_status_bad_key — expect ERR_INPUT
+  r3 := cwa.set_person_status(new_person, 'unknown_status_key'::text);
+  RETURN QUERY SELECT * FROM cwa._t_row('set_person_status_bad_key', (r3->>'ok')::boolean = false AND r3->>'err_code'='ERR_INPUT', NULL, r3->>'err_code');
+
+  -- 18) upsert_contact_methods_ok
+  r3 := cwa.upsert_contact_methods(new_person, 'final.person@example.com', '+1 206 555 8003');
+  RETURN QUERY SELECT * FROM cwa._t_row('upsert_contact_methods_ok', (r3->>'ok')::boolean, r3->'data', r3->>'err_code');
+
+  -- 19) add_person_role_ok
+  r3 := cwa.add_person_role(new_person, 'pilot');
+  RETURN QUERY SELECT * FROM cwa._t_row('add_person_role_ok', (r3->>'ok')::boolean, r3->'data', r3->>'err_code');
+
+  -- 20) remove_person_role_ok
+  r3 := cwa.remove_person_role(new_person, 'pilot');
+  RETURN QUERY SELECT * FROM cwa._t_row('remove_person_role_ok', (r3->>'ok')::boolean, r3->'data', r3->>'err_code');
 
   -- Final safety: surface any unexpected deferrable violation
   BEGIN
