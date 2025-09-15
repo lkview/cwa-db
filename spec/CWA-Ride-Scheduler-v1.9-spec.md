@@ -315,6 +315,23 @@ All tests return JSON with `ok`, `err_code`, optional `warnings`.
 - `v_my_rides_scope_ok` — Pilot sees only their own rides.  
 - `v_my_ec_rides_scope_ok` — EC sees only rides where they’re linked.
 
+**Assignments — composition & overlaps (deferred)**
+- `second_pilot_db_error` — Exactly one pilot; early `ERR_COMPOSITION` **or** commit-time constraint is acceptable.  
+- `third_passenger_db_error` — ≤2 passengers.  
+- `overlap_db_error` — No double-booking.
+
+**Emergency contacts — Option B**
+- `ec_before_passenger_blocked` — EC link before passenger assignment → `ERR_EC_LINK`.  
+- `ec_wrong_status_or_role_blocked` — EC invalid → `ERR_STATUS`/`ERR_ROLE`.  
+- `ec_unavailable_blocked` — EC unavailable → `ERR_UNAVAILABLE`.  
+- `ec_link_ok` — Happy path.
+
+**Self-service & Views (Phase 3)**
+- `self_set_unavailability_ok` — Caller can set their own unavailability via SECURITY DEFINER RPC (scoped by `app_user_people`).  
+- `v_my_rides_scope_ok` — With caller’s JWT, returns rides where caller is **pilot** only.  
+- `v_my_ec_rides_scope_ok` — With caller’s JWT, returns rides where caller is linked as **EC** only.
+
+
 ---
 
 ## 13) Implementation Notes
